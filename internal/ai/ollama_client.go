@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 // FlexibleFloatOrString представляет собой поле, которое может быть либо float64, либо string.
@@ -54,20 +57,64 @@ func (ffos FlexibleFloatOrString) String() string {
 	return ffos.StringValue
 }
 
+// FlexibleStringOrNumber представляет собой поле, которое может быть либо string, либо float64.
+type FlexibleStringOrNumber struct {
+	StringValue string
+	FloatValue  float64
+	IsString    bool
+	IsNull      bool
+}
+
+// UnmarshalJSON реализует интерфейс json.Unmarshaler для FlexibleStringOrNumber.
+func (fsn *FlexibleStringOrNumber) UnmarshalJSON(data []byte) error {
+	// Проверка на JSON null
+	if string(data) == "null" {
+		fsn.IsNull = true
+		return nil
+	}
+
+	// Попытка демаршалинга как float64 (сначала пробуем число)
+	if err := json.Unmarshal(data, &fsn.FloatValue); err == nil {
+		fsn.IsString = false
+		fsn.IsNull = false
+		return nil
+	}
+
+	// Если не float64, попытка демаршалинга как string
+	if err := json.Unmarshal(data, &fsn.StringValue); err == nil {
+		fsn.IsString = true
+		fsn.IsNull = false
+		return nil
+	}
+
+	return fmt.Errorf("could not unmarshal into float64 or string: %s", data)
+}
+
+// String возвращает строковое представление FlexibleStringOrNumber.
+func (fsn FlexibleStringOrNumber) String() string {
+	if fsn.IsNull {
+		return ""
+	}
+	if fsn.IsString {
+		return fsn.StringValue
+	}
+	return fmt.Sprintf("%.2f", fsn.FloatValue)
+}
+
 type MessageAnalysis struct {
 	Predictions []FinancialPrediction
 }
 
 type FinancialPrediction struct {
-	MessageID           string                `json:"message_id"`
-	PredictionType      string                `json:"prediction_type"`
-	Ticker              string                `json:"ticker"`
-	TargetPrice         string                `json:"target_price"`
-	TargetChangePercent FlexibleFloatOrString `json:"target_change_percent"` // Изменено на FlexibleFloatOrString
-	Period              string                `json:"period"`
-	Recommendation      string                `json:"recommendation"`
-	Direction           string                `json:"direction"`
-	JustificationText   string                `json:"justification_text"`
+	MessageID           string                 `json:"message_id"`
+	PredictionType      string                 `json:"prediction_type"`
+	Ticker              string                 `json:"ticker"`
+	TargetPrice         FlexibleStringOrNumber `json:"target_price"`
+	TargetChangePercent FlexibleFloatOrString  `json:"target_change_percent"` // Изменено на FlexibleFloatOrString
+	Period              string                 `json:"period"`
+	Recommendation      string                 `json:"recommendation"`
+	Direction           string                 `json:"direction"`
+	JustificationText   string                 `json:"justification_text"`
 }
 
 type AIClient interface {
@@ -78,6 +125,7 @@ type AIClient interface {
 type OllamaClient struct {
 	baseURL string
 	model   string
+	debug   bool
 }
 
 // OllamaGenerateRequest - структура для запроса к Ollama API /api/generate
@@ -95,10 +143,11 @@ type OllamaGenerateResponse struct {
 	Done      bool   `json:"done"`
 }
 
-func NewOllamaClient(baseURL string, model string) *OllamaClient {
+func NewOllamaClient(baseURL string, model string, debug bool) *OllamaClient {
 	return &OllamaClient{
 		baseURL: baseURL,
 		model:   model,
+		debug:   debug,
 	}
 }
 
@@ -122,6 +171,7 @@ func (s *PredictionStep) Execute(ctx context.Context, client *OllamaClient, mess
 	prompt := fmt.Sprintf(`
 	Ты опытный финансовый аналитик. Твоя задача — извлечь из предоставленного сообщения прогнозы по акциям и структурировать их в формате JSON. Если какая-либо информация (например, целевая цена или период) отсутствует, используй значение null.
 	Формат ответа: JSON-массив, содержащий один или несколько объектов. Каждый объект должен иметь следующие поля:
+	message_id: Уникальный идентификатор сообщения, переданный тебе для анализа. (например, %s)
 	prediction_type: Тип прогноза. Выбери наиболее подходящий вариант из списка: "Продолжение тренда", "Разворот", "Цель с коррекцией", "Накопление перед пробоем", "Долгосрочный пессимизм", "Неопределенный".
 	ticker: Тикер акции, указанный в сообщении (например, AFLT).
 	period: Временной горизонт прогноза. Используй один из вариантов: "Сегодня", "Краткосрочный", "Среднесрочный", "Долгосрочный", "Неопределенный".
@@ -133,7 +183,7 @@ func (s *PredictionStep) Execute(ctx context.Context, client *OllamaClient, mess
 
 	Сообщение: %s
 
-	Отвечай только JSON, без дополнительного текста.`, message)
+	Отвечай только JSON, без дополнительного текста.`, messageID, message)
 
 	req := OllamaGenerateRequest{
 		Model:  client.model,
@@ -154,18 +204,43 @@ func (s *PredictionStep) Execute(ctx context.Context, client *OllamaClient, mess
 	content := ollamaResponse.Response
 	content = strings.TrimSpace(content)
 
-	// Пытаемся найти JSON в ответе (Ollama иногда добавляет перед/после JSON)
-	jsonStart := strings.Index(content, "[")
-	jsonEnd := strings.LastIndex(content, "]")
+	// Удаляем Markdown-обертку, если она есть
+	if strings.HasPrefix(content, "```json") && strings.HasSuffix(content, "```") {
+		content = strings.TrimPrefix(content, "```json")
+		content = strings.TrimSuffix(content, "```")
+		content = strings.TrimSpace(content)
+	}
 
-	if jsonStart == -1 || jsonEnd == -1 {
+	// Пытаемся найти JSON в ответе (это может быть объект или массив)
+	jsonStart := -1
+	jsonEnd := -1
+
+	firstBrace := strings.Index(content, "{")
+	firstBracket := strings.Index(content, "[")
+
+	if firstBrace != -1 && (firstBracket == -1 || firstBrace < firstBracket) {
+		jsonStart = firstBrace
+		jsonEnd = strings.LastIndex(content, "}")
+	} else if firstBracket != -1 {
+		jsonStart = firstBracket
+		jsonEnd = strings.LastIndex(content, "]")
+	}
+
+	if jsonStart == -1 || jsonEnd == -1 || jsonEnd < jsonStart {
 		return nil, fmt.Errorf("invalid JSON response from Ollama: %s", content)
 	}
 
 	jsonContent := content[jsonStart : jsonEnd+1]
 
-	// log.Printf("Ollama Financial Prediction Raw JSON Content: %s", jsonContent) // Логируем извлеченный JSON
+	if client.debug {
+		log.Printf("Ollama Financial Prediction Raw JSON Content: %s", jsonContent) // Логируем извлеченный JSON
+	}
 
+	if jsonContent == "" || jsonContent == "null" {
+		return nil, fmt.Errorf("ollama returned empty or null JSON content")
+	}
+
+	log.Printf("Attempting to unmarshal JSON into []FinancialPrediction, content length: %d", len(jsonContent))
 	var predictions []FinancialPrediction
 	if err := json.Unmarshal([]byte(jsonContent), &predictions); err != nil {
 		// Если не удалось демаршалировать как слайс, пробуем как одиночный объект
@@ -175,6 +250,12 @@ func (s *PredictionStep) Execute(ctx context.Context, client *OllamaClient, mess
 		} else {
 			return nil, fmt.Errorf("failed to unmarshal financial prediction JSON: %w, content: %s", err, jsonContent)
 		}
+	}
+
+	log.Printf("Successfully unmarshaled %d predictions.", len(predictions))
+
+	if len(predictions) == 0 {
+		return nil, fmt.Errorf("ollama analysis returned no predictions from content: %s", jsonContent)
 	}
 
 	return predictions, nil
@@ -219,12 +300,16 @@ func (c *OllamaClient) sendOllamaRequest(ctx context.Context, prompt string) ([]
 }
 
 func (c *OllamaClient) AnalyzeMessage(ctx context.Context, message, channel string) (*MessageAnalysis, error) {
-	messageID := "some_unique_id" // TODO: Заменить на реальную генерацию ID
+	messageID := uuid.New().String() // Генерация уникального ID для сообщения
 
 	predictionStep := NewPredictionStep()
 	predictions, err := predictionStep.Execute(ctx, c, message, messageID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute prediction step: %w", err)
+	}
+
+	if len(predictions) == 0 {
+		return nil, fmt.Errorf("no predictions returned for message ID %s", messageID)
 	}
 
 	return &MessageAnalysis{

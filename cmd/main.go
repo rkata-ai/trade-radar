@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"traiding/internal/ai"
@@ -15,16 +18,26 @@ import (
 func main() {
 	// Парсинг флагов командной строки
 	var configPath string
+	var inputFilePath string
+	var outputTo string
+	var outputFilePath string
+	var debugFlag bool
+
 	flag.StringVar(&configPath, "config", "", "Path to configuration file (required)")
+	flag.StringVar(&inputFilePath, "input-file", "", "Path to a text file with messages (one message per line, required)")
+	flag.StringVar(&outputTo, "output-to", "console", "Output results to 'console' or 'file'")
+	flag.StringVar(&outputFilePath, "output-file", "analysis_results.json", "Path to the output JSON file if output-to is 'file'")
+	flag.BoolVar(&debugFlag, "debug", false, "Enable debug logging, including raw Ollama responses")
 	flag.Parse()
+
+	outputTo = strings.TrimSpace(outputTo) // Очищаем значение outputTo от пробельных символов
 
 	// Инициализация логгера
 	logger := log.Default()
 
-	// Проверяем, что флаг config передан
-	if configPath == "" {
-		logger.Printf("Usage: ./bin/trading.exe -config <path_to_config>")
-		logger.Printf("Example: ./bin/trading.exe -config bin/config.yaml")
+	// Проверяем, что флаги config и input-file переданы
+	if configPath == "" || inputFilePath == "" {
+		logger.Printf("Usage: ./bin/trading.exe -config <path_to_config> -input-file <path> [--output-to <console|file>] [--output-file <path>]")
 		os.Exit(1)
 	}
 
@@ -38,34 +51,81 @@ func main() {
 	}
 
 	// Инициализация AI клиента
-	aiClient := ai.NewOllamaClient(cfg.AI.OllamaBaseURL, cfg.AI.OllamaModel)
+	aiClient := ai.NewOllamaClient(cfg.AI.OllamaBaseURL, cfg.AI.OllamaModel, debugFlag)
 
-	// Пример использования AnalyzeMessage
-	testMessage := "#Аэрофлот (#AFLT) - прогноз реализовался, что дальше?  Пару недель назад писал, что акции авиаперевозчика - одни из главных кандидатов на отскок. Технически тогда всё выглядело максимально лонгово 👇  1️⃣ Отскок котировок от сильнейшего уровня 46 и глобальной трендовой, которая начала формироваться сразу после мобилизации  2️⃣ Сформированный разворотный паттерн доджи на важнейших значениях из 1 пункта.   Да и в целом цена пришла на точку входа, от которой в сентябре показала 30% рост. Так что получили сильнейшее комбо - со своих минимумов акции выросли также на 30%.  Скептики часто любят говорить - самолетов нет у нас, всё ломается, долг большой. Откуда ж взяться росту?  Как видите, такая банальная логика совершенно не работает. Это из разряда мыслей новичков, что Белуга и Абрау Дюрсо непременно сильно вырастут перед НГ (все ж алкашку покупают), а акции Whoosh обязательно будут падать с ноябрьского окончания сезона.  Реально всё работает иначе - у Аэрофлота растёт пассажиропоток и цены на авиабилеты, для инвесторов это куда важнее остальных проблем. Именно поэтому в 3 квартале сильно выросла выручка (+37%), чистая прибыль составила 17.6 млрд против 9.3 млрд убытка годом ранее и сократился чистый долг на 9.7%.  Что по технике? В районе 64 очень сильный уровень, от которого начиналась сильная коррекция в июне и ноябре. До сопротивления порядка 7-8%, поэтому небольшое пространство для роста ещё есть.  Но пытаться выжать от позиции по максимуму далеко не всегда заканчивается полезно для портфеля, поэтому начинать фиксироваться надо уже сейчас, благо прибыль весьма жирная (от 20% до 25% в зависимости от точки входа).  А вот при штурме сопротивления 64 и попытках отката можно будет присмотреться к шорту. Но пока об этом рано, если будут технические предпосылки для коррекции, напишу в канале 😎"
+	var messages []string
 	testChannel := "TestChannel"
 
-	logger.Printf("Analyzing message: %s", testMessage)
-	analysis, err := aiClient.AnalyzeMessage(context.Background(), testMessage, testChannel)
+	file, err := os.Open(inputFilePath)
 	if err != nil {
-		logger.Fatalf("Failed to analyze message: %v", err)
+		logger.Fatalf("Failed to open input file: %v", err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		message := scanner.Text()
+		if message != "" {
+			messages = append(messages, message)
+		}
 	}
 
-	logger.Print("\n--- AI Analysis (Ollama): ---")
-	if len(analysis.Predictions) > 0 {
-		for i, prediction := range analysis.Predictions {
-			logger.Printf("\n--- Prediction %d ---", i+1)
-			logger.Printf("  Message ID: %s", prediction.MessageID)
-			logger.Printf("  Prediction Type: %s", prediction.PredictionType)
-			logger.Printf("  Ticker: %s", prediction.Ticker)
-			logger.Printf("  Target Price: %s", prediction.TargetPrice)
-			logger.Printf("  Target Change Percent: %s", prediction.TargetChangePercent)
-			logger.Printf("  Period: %s", prediction.Period)
-			logger.Printf("  Recommendation: %s", prediction.Recommendation)
-			logger.Printf("  Direction: %s", prediction.Direction)
-			logger.Printf("  Justification Text: %s", prediction.JustificationText)
+	if err := scanner.Err(); err != nil {
+		logger.Fatalf("Failed to read input file: %v", err)
+	}
+	if len(messages) == 0 {
+		logger.Fatal("Input file is empty or contains no messages.")
+	}
+	logger.Printf("Read %d messages from %s", len(messages), inputFilePath)
+
+	var allAnalyses []*ai.MessageAnalysis
+	for idx, message := range messages {
+		logger.Printf("Analyzing message %d/%d: %s", idx+1, len(messages), message)
+		analysis, err := aiClient.AnalyzeMessage(context.Background(), message, testChannel)
+		if err != nil {
+			logger.Printf("Failed to analyze message %d: %v", idx+1, err)
+			continue
 		}
-	} else {
-		logger.Print("  No financial predictions available.")
+		allAnalyses = append(allAnalyses, analysis) // Продолжаем собирать результаты для вывода в файл
+
+		switch outputTo {
+		case "console":
+			logger.Printf("\n### Message %d ###\n", idx+1)
+			if len(analysis.Predictions) > 0 {
+				for i, prediction := range analysis.Predictions {
+					logger.Printf("--- Prediction %d ---", i+1)
+					logger.Printf("  Message ID: %s", prediction.MessageID)
+					logger.Printf("  Prediction Type: %s", prediction.PredictionType)
+					logger.Printf("  Ticker: %s", prediction.Ticker)
+					logger.Printf("  Target Price: %s", prediction.TargetPrice)
+					logger.Printf("  Target Change Percent: %s", prediction.TargetChangePercent)
+					logger.Printf("  Period: %s", prediction.Period)
+					logger.Printf("  Recommendation: %s", prediction.Recommendation)
+					logger.Printf("  Direction: %s", prediction.Direction)
+					logger.Printf("  Justification Text: %s\n", prediction.JustificationText)
+				}
+			} else {
+				logger.Printf("  No financial predictions available for message %d.\n", idx+1)
+			}
+		case "file":
+			// Записываем текущий батч в файл после каждого сообщения
+			outputJSON, marshalErr := json.MarshalIndent(allAnalyses, "", "  ")
+			if marshalErr != nil {
+				logger.Printf("Failed to marshal analysis results to JSON for message %d: %v", idx+1, marshalErr)
+			} else {
+				err := os.WriteFile(outputFilePath, outputJSON, 0644)
+				if err != nil {
+					logger.Printf("Failed to write analysis results to file %s for message %d: %v", outputFilePath, idx+1, err)
+				} else {
+					logger.Printf("Analysis results for message %d written to %s", idx+1, outputFilePath)
+				}
+			}
+		}
+	}
+
+	// Обработка случая, если outputTo не является ни 'console', ни 'file'
+	if outputTo != "console" && outputTo != "file" {
+		logger.Fatalf("Invalid output-to option: %s. Use 'console' or 'file'.", outputTo)
 	}
 
 	// Обработка сигналов для graceful shutdown
@@ -73,7 +133,7 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	// Ожидание сигнала завершения
-	logger.Print("\n=== Test completed successfully! ===")
+	logger.Print("\n=== Processing completed successfully! ===")
 	logger.Print("Press Ctrl+C to exit...")
 	<-sigChan
 	logger.Print("Shutting down...")

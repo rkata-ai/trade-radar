@@ -14,6 +14,7 @@ type Config struct {
 type AIConfig struct {
 	OllamaBaseURL string `yaml:"ollama_base_url"`
 	OllamaModel   string `yaml:"ollama_model"`
+	Debug         bool   `yaml:"debug"`
 }
 
 // Load загружает конфигурацию из указанного файла.
