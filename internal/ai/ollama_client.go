@@ -106,11 +106,11 @@ type MessageAnalysis struct {
 }
 
 type FinancialPrediction struct {
-	MessageID           string                 `json:"message_id"`
+	MessageID           uuid.UUID              `json:"message_id"`
 	PredictionType      string                 `json:"prediction_type"`
 	Ticker              string                 `json:"ticker"`
 	TargetPrice         FlexibleStringOrNumber `json:"target_price"`
-	TargetChangePercent FlexibleFloatOrString  `json:"target_change_percent"` // Изменено на FlexibleFloatOrString
+	TargetChangePercent FlexibleStringOrNumber `json:"target_change_percent"`
 	Period              string                 `json:"period"`
 	Recommendation      string                 `json:"recommendation"`
 	Direction           string                 `json:"direction"`
@@ -153,7 +153,7 @@ func NewOllamaClient(baseURL string, model string, debug bool) *OllamaClient {
 
 // PipelineStep определяет интерфейс для шага в конвейере анализа сообщений.
 type PipelineStep interface {
-	Execute(ctx context.Context, client *OllamaClient, message string, messageID string) ([]FinancialPrediction, error)
+	Execute(ctx context.Context, client *OllamaClient, message string, messageID uuid.UUID) ([]FinancialPrediction, error)
 }
 
 // PredictionStep реализует PipelineStep для выполнения финансового прогнозирования.
@@ -167,7 +167,7 @@ func NewPredictionStep() *PredictionStep {
 }
 
 // Execute выполняет шаг прогнозирования, используя предоставленный промт.
-func (s *PredictionStep) Execute(ctx context.Context, client *OllamaClient, message string, messageID string) ([]FinancialPrediction, error) {
+func (s *PredictionStep) Execute(ctx context.Context, client *OllamaClient, message string, messageID uuid.UUID) ([]FinancialPrediction, error) {
 	prompt := fmt.Sprintf(`
 	Ты опытный финансовый аналитик. Твоя задача — извлечь из предоставленного сообщения прогнозы по акциям и структурировать их в формате JSON. Если какая-либо информация (например, целевая цена или период) отсутствует, используй значение null.
 	Формат ответа: JSON-массив, содержащий один или несколько объектов. Каждый объект должен иметь следующие поля:
@@ -183,7 +183,7 @@ func (s *PredictionStep) Execute(ctx context.Context, client *OllamaClient, mess
 
 	Сообщение: %s
 
-	Отвечай только JSON, без дополнительного текста.`, messageID, message)
+	Отвечай только JSON, без дополнительного текста.`, messageID.String(), message)
 
 	req := OllamaGenerateRequest{
 		Model:  client.model,
@@ -299,8 +299,8 @@ func (c *OllamaClient) sendOllamaRequest(ctx context.Context, prompt string) ([]
 	return bodyBytes, nil
 }
 
-func (c *OllamaClient) AnalyzeMessage(ctx context.Context, message, channel string) (*MessageAnalysis, error) {
-	messageID := uuid.New().String() // Генерация уникального ID для сообщения
+func (c *OllamaClient) AnalyzeMessage(ctx context.Context, message, channel string, messageID uuid.UUID) (*MessageAnalysis, error) {
+	// messageID := uuid.New() // Теперь ID приходит из БД
 
 	predictionStep := NewPredictionStep()
 	predictions, err := predictionStep.Execute(ctx, c, message, messageID)
@@ -309,7 +309,7 @@ func (c *OllamaClient) AnalyzeMessage(ctx context.Context, message, channel stri
 	}
 
 	if len(predictions) == 0 {
-		return nil, fmt.Errorf("no predictions returned for message ID %s", messageID)
+		return nil, fmt.Errorf("no predictions returned for message ID %s", messageID.String())
 	}
 
 	return &MessageAnalysis{
@@ -321,7 +321,9 @@ func (c *OllamaClient) AnalyzeBatch(ctx context.Context, messages []string, chan
 	var analyses []*MessageAnalysis
 
 	for _, message := range messages {
-		analysis, err := c.AnalyzeMessage(ctx, message, channel)
+		// В AnalyzeBatch не получаем MessageID из БД, поэтому генерируем новый UUID
+		analyzeMessageID := uuid.New()
+		analysis, err := c.AnalyzeMessage(ctx, message, channel, analyzeMessageID)
 		if err != nil {
 			fmt.Printf("Failed to analyze message: %v\n", err)
 			continue

@@ -2,4 +2,13 @@ ai:
   ollama_base_url: "http://localhost:11434"
   ollama_model: "llama2"
 
+db:
+  host: "localhost"
+  port: 5432
+  user: "user"
+  password: "password"
+  dbname: "dbname"
+  sslmode: "disable"
+  connection_string: ""
+
 
