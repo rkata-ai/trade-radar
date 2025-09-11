@@ -1,6 +1,10 @@
 ai:
   ollama_base_url: "http://localhost:11434"
-  ollama_model: "llama2"
+  ollama_model: "gemma3:1b"
+  temperature: 0.7
+  top_p: 0.9
+  max_tokens: 2048
+  stop: []
 
 db:
   host: "localhost"
@@ -9,6 +13,5 @@ db:
   password: "password"
   dbname: "dbname"
   sslmode: "disable"
-  connection_string: ""
 
 

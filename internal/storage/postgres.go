@@ -8,7 +8,6 @@ import (
 
 	"rkata-ai/trade-radar/internal/config"
 
-	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 )
 
@@ -96,19 +95,18 @@ func (p *PostgresStorage) SavePrediction(ctx context.Context, prediction *Predic
 
 	query := `
 		INSERT INTO predictions (
-			id, message_id, ticker, prediction_type, target_price, 
+			message_id, stock_id, prediction_type, target_price, 
 			target_change_percent, period, recommendation, direction, 
 			justification_text, predicted_at
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10
 		) RETURNING id
 	`
 
-	var id uuid.UUID
+	var lastInsertID int64
 	err := p.db.QueryRowContext(ctx, query,
-		prediction.ID,
 		prediction.MessageID,
-		prediction.Ticker,
+		prediction.StockID,
 		prediction.PredictionType,
 		prediction.TargetPrice,
 		prediction.TargetChangePercent,
@@ -117,13 +115,42 @@ func (p *PostgresStorage) SavePrediction(ctx context.Context, prediction *Predic
 		prediction.Direction,
 		prediction.JustificationText,
 		prediction.PredictedAt,
-	).Scan(&id)
+	).Scan(&lastInsertID)
 
 	if err != nil {
-		return fmt.Errorf("failed to save prediction: %w", op, err)
+		return fmt.Errorf("%s: failed to save prediction: %w", op, err)
 	}
 
+	prediction.ID = lastInsertID
+
 	return nil
+}
+
+func (p *PostgresStorage) GetOrCreateStock(ctx context.Context, ticker string) (*Stock, error) {
+	const op = "storage.GetOrCreateStock"
+
+	var stock Stock
+	query := `
+		INSERT INTO stocks (ticker)
+		VALUES ($1)
+		ON CONFLICT (ticker) DO UPDATE SET ticker = EXCLUDED.ticker
+		RETURNING id, ticker, name, industry_id, exchange, currency, created_at
+	`
+
+	err := p.db.QueryRowContext(ctx, query, ticker).Scan(
+		&stock.ID,
+		&stock.Ticker,
+		&stock.Name,
+		&stock.IndustryID,
+		&stock.Exchange,
+		&stock.Currency,
+		&stock.CreatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("%s: failed to get or create stock: %w", op, err)
+	}
+
+	return &stock, nil
 }
 
 func (p *PostgresStorage) Close() error {

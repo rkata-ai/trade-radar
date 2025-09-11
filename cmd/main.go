@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -15,8 +16,6 @@ import (
 	"rkata-ai/trade-radar/internal/ai"
 	"rkata-ai/trade-radar/internal/config"
 	"rkata-ai/trade-radar/internal/storage"
-
-	"github.com/google/uuid"
 )
 
 func main() {
@@ -57,6 +56,10 @@ func main() {
 	logger.Printf("  AI.OllamaBaseURL: %s", cfg.AI.OllamaBaseURL)
 	logger.Printf("  AI.OllamaModel: %s", cfg.AI.OllamaModel)
 	logger.Printf("  AI.Debug: %t", cfg.AI.Debug)
+	logger.Printf("  AI.Temperature: %.2f", cfg.AI.Temperature)
+	logger.Printf("  AI.TopP: %.2f", cfg.AI.TopP)
+	logger.Printf("  AI.MaxTokens: %d", cfg.AI.MaxTokens)
+	logger.Printf("  AI.Stop: %v", cfg.AI.Stop)
 	logger.Printf("  Database.Host: %s", cfg.Database.Host)
 	logger.Printf("  Database.Port: %d", cfg.Database.Port)
 	logger.Printf("  Database.User: %s", cfg.Database.User)
@@ -65,7 +68,15 @@ func main() {
 	logger.Printf("  Database.ConnectionString: %s", cfg.Database.ConnectionString)
 
 	// Инициализация AI клиента
-	aiClient := ai.NewOllamaClient(cfg.AI.OllamaBaseURL, cfg.AI.OllamaModel, debugFlag)
+	aiClient := ai.NewOllamaClient(
+		cfg.AI.OllamaBaseURL,
+		cfg.AI.OllamaModel,
+		debugFlag,
+		cfg.AI.Temperature,
+		cfg.AI.TopP,
+		cfg.AI.MaxTokens,
+		cfg.AI.Stop,
+	)
 
 	// Инициализация хранилища базы данных
 	var dbStorage storage.Storage
@@ -89,10 +100,10 @@ func main() {
 
 	var allAnalyses []*ai.MessageAnalysis
 	for idx, message := range messages {
-		logger.Printf("Analyzing message %d/%d (ID: %s): %s", idx+1, len(messages), message.ID.String(), message.Text.String)
-		analysis, err := aiClient.AnalyzeMessage(context.Background(), message.Text.String, message.ChannelID.String(), message.ID)
+		logger.Printf("Analyzing message %d/%d (ID: %d): %s", idx+1, len(messages), message.ID, message.Text.String)
+		analysis, err := aiClient.AnalyzeMessage(context.Background(), message.Text.String, fmt.Sprintf("%d", message.ChannelID), message.ID)
 		if err != nil {
-			logger.Printf("Failed to analyze message %d (ID: %s): %v", idx+1, message.ID.String(), err)
+			logger.Printf("Failed to analyze message %d (ID: %d): %v", idx+1, message.ID, err)
 			continue
 		}
 		allAnalyses = append(allAnalyses, analysis)
@@ -102,17 +113,22 @@ func main() {
 			for _, pred := range analysis.Predictions {
 				// Проверяем, что Ticker не пустой и PredictionType не 'Неопределенный' перед сохранением
 				if pred.Ticker == "" || pred.PredictionType == "Неопределенный" {
-					logger.Printf("Prediction for message %s with ticker '%s' and type '%s' ignored (empty ticker or 'Неопределенный' type). Skipping.", message.ID.String(), pred.Ticker, pred.PredictionType)
+					logger.Printf("Prediction for message %d with ticker '%s' and type '%s' ignored (empty ticker or 'Неопределенный' type). Skipping.", message.ID, pred.Ticker, pred.PredictionType)
+					continue
+				}
+
+				stock, err := dbStorage.GetOrCreateStock(context.Background(), pred.Ticker)
+				if err != nil {
+					logger.Printf("Failed to get or create stock for ticker %s: %v", pred.Ticker, err)
 					continue
 				}
 
 				dbPrediction := storage.Prediction{
-					ID:                  uuid.New(),
 					MessageID:           message.ID,
-					Ticker:              pred.Ticker,
+					StockID:             stock.ID,
 					PredictionType:      sql.NullString{String: pred.PredictionType, Valid: pred.PredictionType != ""},
-					TargetPrice:         sql.NullString{String: pred.TargetPrice.String(), Valid: !pred.TargetPrice.IsNull},
-					TargetChangePercent: sql.NullString{String: pred.TargetChangePercent.String(), Valid: !pred.TargetChangePercent.IsNull},
+					TargetPrice:         sql.NullFloat64{Float64: pred.TargetPrice.FloatValue, Valid: !pred.TargetPrice.IsNull && !pred.TargetPrice.IsString},
+					TargetChangePercent: sql.NullFloat64{Float64: pred.TargetChangePercent.FloatValue, Valid: !pred.TargetChangePercent.IsNull && !pred.TargetChangePercent.IsString},
 					Period:              sql.NullString{String: pred.Period, Valid: pred.Period != ""},
 					Recommendation:      sql.NullString{String: pred.Recommendation, Valid: pred.Recommendation != ""},
 					Direction:           sql.NullString{String: pred.Direction, Valid: pred.Direction != ""},
@@ -122,9 +138,9 @@ func main() {
 
 				err = dbStorage.SavePrediction(context.Background(), &dbPrediction)
 				if err != nil {
-					logger.Printf("Failed to save prediction for message %s: %v", message.ID.String(), err)
+					logger.Printf("Failed to save prediction for message %d: %v", message.ID, err)
 				} else {
-					logger.Printf("Prediction for message %s saved to DB.", message.ID.String())
+					logger.Printf("Prediction for message %d saved to DB.", message.ID)
 				}
 			}
 		} else {
@@ -135,11 +151,11 @@ func main() {
 					for i, prediction := range analysis.Predictions {
 						// Проверяем, что Ticker не пустой и PredictionType не 'Неопределенный' перед выводом в консоль
 						if prediction.Ticker == "" || prediction.PredictionType == "Неопределенный" {
-							logger.Printf("Prediction for message %s with ticker '%s' and type '%s' ignored (empty ticker or 'Неопределенный' type). Skipping console output.", prediction.MessageID.String(), prediction.Ticker, prediction.PredictionType)
+							logger.Printf("Prediction for message %d with ticker '%s' and type '%s' ignored (empty ticker or 'Неопределенный' type). Skipping console output.", prediction.MessageID, prediction.Ticker, prediction.PredictionType)
 							continue
 						}
 						logger.Printf("--- Prediction %d ---", i+1)
-						logger.Printf("  Message ID: %s", prediction.MessageID.String())
+						logger.Printf("  Message ID: %d", prediction.MessageID)
 						logger.Printf("  Prediction Type: %s", prediction.PredictionType)
 						logger.Printf("  Ticker: %s", prediction.Ticker)
 						logger.Printf("  Target Price: %s", prediction.TargetPrice.String())

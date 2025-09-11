@@ -9,8 +9,6 @@ import (
 	"log"
 	"net/http"
 	"strings"
-
-	"github.com/google/uuid"
 )
 
 // FlexibleFloatOrString представляет собой поле, которое может быть либо float64, либо string.
@@ -106,7 +104,7 @@ type MessageAnalysis struct {
 }
 
 type FinancialPrediction struct {
-	MessageID           uuid.UUID              `json:"message_id"`
+	MessageID           int64                  `json:"message_id"`
 	PredictionType      string                 `json:"prediction_type"`
 	Ticker              string                 `json:"ticker"`
 	TargetPrice         FlexibleStringOrNumber `json:"target_price"`
@@ -118,21 +116,30 @@ type FinancialPrediction struct {
 }
 
 type AIClient interface {
-	AnalyzeMessage(ctx context.Context, message, channel string) (*MessageAnalysis, error)
+	AnalyzeMessage(ctx context.Context, message, channel string, messageID int64) (*MessageAnalysis, error)
 	AnalyzeBatch(ctx context.Context, messages []string, channel string) ([]*MessageAnalysis, error)
 }
 
 type OllamaClient struct {
-	baseURL string
-	model   string
-	debug   bool
+	baseURL         string
+	model           string
+	debug           bool
+	sendRequestFunc func(ctx context.Context, prompt string) ([]byte, error) // Добавлено для мокирования
+	temperature     float64
+	topP            float64
+	maxTokens       int
+	stop            []string
 }
 
 // OllamaGenerateRequest - структура для запроса к Ollama API /api/generate
 type OllamaGenerateRequest struct {
-	Model  string `json:"model"`
-	Prompt string `json:"prompt"`
-	Stream bool   `json:"stream"`
+	Model       string   `json:"model"`
+	Prompt      string   `json:"prompt"`
+	Stream      bool     `json:"stream"`
+	Temperature float64  `json:"temperature,omitempty"`
+	TopP        float64  `json:"top_p,omitempty"`
+	MaxTokens   int      `json:"num_predict,omitempty"` // Ollama использует num_predict для max_tokens
+	Stop        []string `json:"stop,omitempty"`
 }
 
 // OllamaGenerateResponse - структура для ответа от Ollama API /api/generate
@@ -143,17 +150,23 @@ type OllamaGenerateResponse struct {
 	Done      bool   `json:"done"`
 }
 
-func NewOllamaClient(baseURL string, model string, debug bool) *OllamaClient {
-	return &OllamaClient{
-		baseURL: baseURL,
-		model:   model,
-		debug:   debug,
+func NewOllamaClient(baseURL string, model string, debug bool, temperature float64, topP float64, maxTokens int, stop []string) *OllamaClient {
+	client := &OllamaClient{
+		baseURL:     baseURL,
+		model:       model,
+		debug:       debug,
+		temperature: temperature,
+		topP:        topP,
+		maxTokens:   maxTokens,
+		stop:        stop,
 	}
+	client.sendRequestFunc = client.defaultSendOllamaRequest // Инициализируем реальной функцией
+	return client
 }
 
 // PipelineStep определяет интерфейс для шага в конвейере анализа сообщений.
 type PipelineStep interface {
-	Execute(ctx context.Context, client *OllamaClient, message string, messageID uuid.UUID) ([]FinancialPrediction, error)
+	Execute(ctx context.Context, client *OllamaClient, message string, messageID int64) ([]FinancialPrediction, error)
 }
 
 // PredictionStep реализует PipelineStep для выполнения финансового прогнозирования.
@@ -167,23 +180,22 @@ func NewPredictionStep() *PredictionStep {
 }
 
 // Execute выполняет шаг прогнозирования, используя предоставленный промт.
-func (s *PredictionStep) Execute(ctx context.Context, client *OllamaClient, message string, messageID uuid.UUID) ([]FinancialPrediction, error) {
+func (s *PredictionStep) Execute(ctx context.Context, client *OllamaClient, message string, messageID int64) ([]FinancialPrediction, error) {
 	prompt := fmt.Sprintf(`
 	Ты опытный финансовый аналитик. Твоя задача — извлечь из предоставленного сообщения прогнозы по акциям и структурировать их в формате JSON. Если какая-либо информация (например, целевая цена или период) отсутствует, используй значение null.
 	Формат ответа: JSON-массив, содержащий один или несколько объектов. Каждый объект должен иметь следующие поля:
-	message_id: Уникальный идентификатор сообщения, переданный тебе для анализа. (например, %s)
-	prediction_type: Тип прогноза. Выбери наиболее подходящий вариант из списка: "Продолжение тренда", "Разворот", "Цель с коррекцией", "Накопление перед пробоем", "Долгосрочный пессимизм", "Неопределенный".
-	ticker: Тикер акции, указанный в сообщении (например, AFLT).
+	prediction_type: Тип прогноза. Используй один из вариантов: "Продолжение тренда", "Разворот", "Цель с коррекцией", "Накопление перед пробоем", "Долгосрочный пессимизм", "Неопределенный".
+	ticker: Тикер акции, указанный в сообщении.
 	period: Временной горизонт прогноза. Используй один из вариантов: "Сегодня", "Краткосрочный", "Среднесрочный", "Долгосрочный", "Неопределенный".
-	target_price: Целевая цена или ценовой диапазон. Извлеки числовое значение. Если в сообщении указан диапазон, используй строку, например "60-65". Если цена не указана, используй null.
-	target_change_percent: Целевой процент изменения цены. Извлеки числовое значение или диапазон в виде строки, например "7-8%%". Если процент не указан, используй null.
+	target_price: Целевая цена или ценовой диапазон. Извлеки числовое значение или диапазон в виде строки. Если цена не указана, используй null.
+	target_change_percent: Целевой процент изменения цены. Извлеки числовое значение или диапазон в виде строки. Если процент не указан, используй null.
 	recommendation: Рекомендация автора сообщения. Используй один из вариантов: "Покупать", "Продавать", "Держать", "Неопределенный".
-	direction: Направление сделки. Выбери один из вариантов: "Лонг", "Шорт", "Неопределенный".
+	direction: Направление сделки. Используй один из вариантов: "Лонг", "Шорт", "Неопределенный".
 	justification_text: Цитата из исходного текста, которая подтверждает данный прогноз.
 
 	Сообщение: %s
 
-	Отвечай только JSON, без дополнительного текста.`, messageID.String(), message)
+	Отвечай только JSON, без дополнительного текста.`, message)
 
 	req := OllamaGenerateRequest{
 		Model:  client.model,
@@ -191,7 +203,7 @@ func (s *PredictionStep) Execute(ctx context.Context, client *OllamaClient, mess
 		Stream: false,
 	}
 
-	res, err := client.sendOllamaRequest(ctx, req.Prompt)
+	res, err := client.sendRequestFunc(ctx, req.Prompt) // Используем внутреннюю функцию
 	if err != nil {
 		return nil, fmt.Errorf("failed to send ollama request: %w", err)
 	}
@@ -242,14 +254,20 @@ func (s *PredictionStep) Execute(ctx context.Context, client *OllamaClient, mess
 
 	log.Printf("Attempting to unmarshal JSON into []FinancialPrediction, content length: %d", len(jsonContent))
 	var predictions []FinancialPrediction
-	if err := json.Unmarshal([]byte(jsonContent), &predictions); err != nil {
-		// Если не удалось демаршалировать как слайс, пробуем как одиночный объект
+	err = json.Unmarshal([]byte(jsonContent), &predictions)
+	if err != nil {
+		log.Printf("Failed to unmarshal financial prediction JSON as slice, attempting as single object: %v", err)
+		// Если не удалось демаршалировать как слайс, попробуем как одиночный объект
 		var singlePrediction FinancialPrediction
 		if err := json.Unmarshal([]byte(jsonContent), &singlePrediction); err == nil {
 			predictions = []FinancialPrediction{singlePrediction}
 		} else {
-			return nil, fmt.Errorf("failed to unmarshal financial prediction JSON: %w, content: %s", err, jsonContent)
+			return nil, fmt.Errorf("failed to unmarshal financial prediction JSON as slice or single object: %w, content: %s", err, jsonContent)
 		}
+	}
+
+	for i := range predictions {
+		predictions[i].MessageID = messageID
 	}
 
 	log.Printf("Successfully unmarshaled %d predictions.", len(predictions))
@@ -262,11 +280,16 @@ func (s *PredictionStep) Execute(ctx context.Context, client *OllamaClient, mess
 }
 
 // sendOllamaRequest отправляет запрос к Ollama API и возвращает байты ответа.
-func (c *OllamaClient) sendOllamaRequest(ctx context.Context, prompt string) ([]byte, error) {
+// Переименовываем оригинальную функцию в defaultSendOllamaRequest
+func (c *OllamaClient) defaultSendOllamaRequest(ctx context.Context, prompt string) ([]byte, error) {
 	requestBody := OllamaGenerateRequest{
-		Model:  c.model,
-		Prompt: prompt,
-		Stream: false, // Мы хотим получить весь ответ сразу
+		Model:       c.model,
+		Prompt:      prompt,
+		Stream:      false, // Мы хотим получить весь ответ сразу
+		Temperature: c.temperature,
+		TopP:        c.topP,
+		MaxTokens:   c.maxTokens,
+		Stop:        c.stop,
 	}
 
 	jsonData, err := json.Marshal(requestBody)
@@ -299,7 +322,7 @@ func (c *OllamaClient) sendOllamaRequest(ctx context.Context, prompt string) ([]
 	return bodyBytes, nil
 }
 
-func (c *OllamaClient) AnalyzeMessage(ctx context.Context, message, channel string, messageID uuid.UUID) (*MessageAnalysis, error) {
+func (c *OllamaClient) AnalyzeMessage(ctx context.Context, message, channel string, messageID int64) (*MessageAnalysis, error) {
 	// messageID := uuid.New() // Теперь ID приходит из БД
 
 	predictionStep := NewPredictionStep()
@@ -309,7 +332,7 @@ func (c *OllamaClient) AnalyzeMessage(ctx context.Context, message, channel stri
 	}
 
 	if len(predictions) == 0 {
-		return nil, fmt.Errorf("no predictions returned for message ID %s", messageID.String())
+		return nil, fmt.Errorf("no predictions returned for message ID %d", messageID)
 	}
 
 	return &MessageAnalysis{
@@ -322,7 +345,7 @@ func (c *OllamaClient) AnalyzeBatch(ctx context.Context, messages []string, chan
 
 	for _, message := range messages {
 		// В AnalyzeBatch не получаем MessageID из БД, поэтому генерируем новый UUID
-		analyzeMessageID := uuid.New()
+		analyzeMessageID := int64(0) // Заменить на 0, так как нет реального ID
 		analysis, err := c.AnalyzeMessage(ctx, message, channel, analyzeMessageID)
 		if err != nil {
 			fmt.Printf("Failed to analyze message: %v\n", err)

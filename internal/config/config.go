@@ -12,9 +12,13 @@ type Config struct {
 }
 
 type AIConfig struct {
-	OllamaBaseURL string `mapstructure:"ollama_base_url"`
-	OllamaModel   string `mapstructure:"ollama_model"`
-	Debug         bool   `mapstructure:"debug"`
+	OllamaBaseURL string   `mapstructure:"ollama_base_url"`
+	OllamaModel   string   `mapstructure:"ollama_model"`
+	Debug         bool     `mapstructure:"debug"`
+	Temperature   float64  `mapstructure:"temperature"`
+	TopP          float64  `mapstructure:"top_p"`
+	MaxTokens     int      `mapstructure:"max_tokens"` // Соответствует num_predict в Ollama API
+	Stop          []string `mapstructure:"stop"`
 }
 
 type DatabaseConfig struct {
@@ -32,6 +36,10 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("ai.ollama_base_url", "http://localhost:11434")
 	viper.SetDefault("ai.ollama_model", "llama2")
 	viper.SetDefault("ai.debug", false)
+	viper.SetDefault("ai.temperature", 0.7)
+	viper.SetDefault("ai.top_p", 0.9)
+	viper.SetDefault("ai.max_tokens", 2048)
+	viper.SetDefault("ai.stop", []string{})
 
 	viper.SetDefault("database.host", "localhost")
 	viper.SetDefault("database.port", 5432)
@@ -74,6 +82,10 @@ func bindEnvs() {
 	viper.BindEnv("ai.ollama_base_url", "TRADING_AI_OLLAMA_BASE_URL")
 	viper.BindEnv("ai.ollama_model", "TRADING_AI_OLLAMA_MODEL")
 	viper.BindEnv("ai.debug", "TRADING_AI_DEBUG")
+	viper.BindEnv("ai.temperature", "TRADING_AI_TEMPERATURE")
+	viper.BindEnv("ai.top_p", "TRADING_AI_TOP_P")
+	viper.BindEnv("ai.max_tokens", "TRADING_AI_MAX_TOKENS")
+	viper.BindEnv("ai.stop", "TRADING_AI_STOP")
 
 	viper.BindEnv("database.host", "TRADING_DATABASE_HOST")
 	viper.BindEnv("database.port", "TRADING_DATABASE_PORT")
