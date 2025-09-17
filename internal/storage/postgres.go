@@ -46,11 +46,11 @@ func (p *PostgresStorage) GetMessagesWithoutPredictions(ctx context.Context, lim
 	messages := []Message{}
 	query := `
 		SELECT
-			m.id, m.telegram_id, m.channel_id, m.text, m.sent_at, m.sender_username, m.is_forward, m.message_type, m.raw_data, m.created_at
+			m.telegram_id, m.channel_id, m.text, m.sent_at, m.sender_username, m.is_forward, m.message_type, m.raw_data, m.created_at
 		FROM
 			messages m
 		LEFT JOIN
-			predictions p ON m.id = p.message_id
+			predictions p ON m.telegram_id  = p.message_id
 		WHERE
 			p.id IS NULL
 		ORDER BY
@@ -66,7 +66,6 @@ func (p *PostgresStorage) GetMessagesWithoutPredictions(ctx context.Context, lim
 	for rows.Next() {
 		message := Message{}
 		err := rows.Scan(
-			&message.ID,
 			&message.TelegramID,
 			&message.ChannelID,
 			&message.Text,
@@ -78,13 +77,13 @@ func (p *PostgresStorage) GetMessagesWithoutPredictions(ctx context.Context, lim
 			&message.CreatedAt,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("failed to scan message row: %w", op, err)
+			return nil, fmt.Errorf("%s: failed to scan message row: %w", op, err)
 		}
 		messages = append(messages, message)
 	}
 
 	if err = rows.Err(); err != nil {
-		return nil, fmt.Errorf("error during rows iteration: %w", op, err)
+		return nil, fmt.Errorf("%s: error during rows iteration: %w", op, err)
 	}
 
 	return messages, nil
@@ -126,15 +125,14 @@ func (p *PostgresStorage) SavePrediction(ctx context.Context, prediction *Predic
 	return nil
 }
 
-func (p *PostgresStorage) GetOrCreateStock(ctx context.Context, ticker string) (*Stock, error) {
-	const op = "storage.GetOrCreateStock"
+func (p *PostgresStorage) GetStock(ctx context.Context, ticker string) (*Stock, error) {
+	const op = "storage.GetStock"
 
 	var stock Stock
 	query := `
-		INSERT INTO stocks (ticker)
-		VALUES ($1)
-		ON CONFLICT (ticker) DO UPDATE SET ticker = EXCLUDED.ticker
-		RETURNING id, ticker, name, industry_id, exchange, currency, created_at
+		SELECT id, ticker, name, industry_id, description, created_at
+		FROM stocks
+		WHERE ticker = $1
 	`
 
 	err := p.db.QueryRowContext(ctx, query, ticker).Scan(
@@ -142,18 +140,55 @@ func (p *PostgresStorage) GetOrCreateStock(ctx context.Context, ticker string) (
 		&stock.Ticker,
 		&stock.Name,
 		&stock.IndustryID,
-		&stock.Exchange,
-		&stock.Currency,
+		&stock.Description,
 		&stock.CreatedAt,
 	)
-	if err != nil {
-		return nil, fmt.Errorf("%s: failed to get or create stock: %w", op, err)
+
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("%s: stock with ticker '%s' not found: %w", op, ticker, err)
+	} else if err != nil {
+		return nil, fmt.Errorf("%s: failed to get stock: %w", op, err)
 	}
 
 	return &stock, nil
 }
 
+func (p *PostgresStorage) SaveRawPrediction(ctx context.Context, rawPrediction *RawPrediction) error {
+	const op = "storage.SaveRawPrediction"
+
+	query := `
+		INSERT INTO raw_predictions (
+			message_id, raw_ticker, prediction_type, target_price,
+			target_change_percent, period, recommendation, direction,
+			justification_text, predicted_at
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+		) RETURNING id
+	`
+
+	var lastInsertID int64
+	err := p.db.QueryRowContext(ctx, query,
+		rawPrediction.MessageID,
+		rawPrediction.RawTicker,
+		rawPrediction.PredictionType,
+		rawPrediction.TargetPrice,
+		rawPrediction.TargetChangePercent,
+		rawPrediction.Period,
+		rawPrediction.Recommendation,
+		rawPrediction.Direction,
+		rawPrediction.JustificationText,
+		rawPrediction.PredictedAt,
+	).Scan(&lastInsertID)
+
+	if err != nil {
+		return fmt.Errorf("%s: failed to save raw prediction: %w", op, err)
+	}
+
+	rawPrediction.ID = lastInsertID
+
+	return nil
+}
+
 func (p *PostgresStorage) Close() error {
-	const op = "storage.Close"
 	return p.db.Close()
 }

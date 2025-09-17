@@ -339,20 +339,3 @@ func (c *OllamaClient) AnalyzeMessage(ctx context.Context, message, channel stri
 		Predictions: predictions,
 	}, nil
 }
-
-func (c *OllamaClient) AnalyzeBatch(ctx context.Context, messages []string, channel string) ([]*MessageAnalysis, error) {
-	var analyses []*MessageAnalysis
-
-	for _, message := range messages {
-		// В AnalyzeBatch не получаем MessageID из БД, поэтому генерируем новый UUID
-		analyzeMessageID := int64(0) // Заменить на 0, так как нет реального ID
-		analysis, err := c.AnalyzeMessage(ctx, message, channel, analyzeMessageID)
-		if err != nil {
-			fmt.Printf("Failed to analyze message: %v\n", err)
-			continue
-		}
-		analyses = append(analyses, analysis)
-	}
-
-	return analyses, nil
-}

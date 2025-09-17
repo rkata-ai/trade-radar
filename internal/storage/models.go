@@ -6,7 +6,6 @@ import (
 )
 
 type Message struct {
-	ID             int64          `db:"id"`
 	TelegramID     int64          `db:"telegram_id"`
 	ChannelID      int64          `db:"channel_id"`
 	Text           sql.NullString `db:"text"`
@@ -40,11 +39,25 @@ type Industry struct {
 }
 
 type Stock struct {
-	ID         int64          `db:"id"`
-	Ticker     string         `db:"ticker"`
-	Name       sql.NullString `db:"name"`
-	IndustryID sql.NullInt64  `db:"industry_id"`
-	Exchange   sql.NullString `db:"exchange"`
-	Currency   sql.NullString `db:"currency"`
-	CreatedAt  time.Time      `db:"created_at"`
+	ID          int64          `db:"id"`
+	Ticker      string         `db:"ticker"`
+	Name        sql.NullString `db:"name"`
+	IndustryID  sql.NullInt64  `db:"industry_id"`
+	Description sql.NullString `db:"description"`
+	CreatedAt   time.Time      `db:"created_at"`
+}
+
+type RawPrediction struct {
+	ID                  int64
+	MessageID           int64
+	RawTicker           sql.NullString
+	PredictionType      sql.NullString
+	TargetPrice         sql.NullFloat64
+	TargetChangePercent sql.NullFloat64
+	Period              sql.NullString
+	Recommendation      sql.NullString
+	Direction           sql.NullString
+	JustificationText   sql.NullString
+	PredictedAt         time.Time
+	CreatedAt           time.Time
 }

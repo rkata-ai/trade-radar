@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"errors"
 	"rkata-ai/trade-radar/internal/ai"
 	"rkata-ai/trade-radar/internal/config"
 	"rkata-ai/trade-radar/internal/storage"
@@ -87,7 +88,7 @@ func main() {
 	defer dbStorage.Close()
 
 	var messages []storage.Message
-	messages, err = dbStorage.GetMessagesWithoutPredictions(context.Background(), 100) // Ограничиваем до 100 сообщений за раз
+	messages, err = dbStorage.GetMessagesWithoutPredictions(context.Background(), 1000) // Ограничиваем до 100 сообщений за раз
 	if err != nil {
 		logger.Fatalf("Failed to get messages from database: %v", err)
 	}
@@ -100,10 +101,10 @@ func main() {
 
 	var allAnalyses []*ai.MessageAnalysis
 	for idx, message := range messages {
-		logger.Printf("Analyzing message %d/%d (ID: %d): %s", idx+1, len(messages), message.ID, message.Text.String)
-		analysis, err := aiClient.AnalyzeMessage(context.Background(), message.Text.String, fmt.Sprintf("%d", message.ChannelID), message.ID)
+		logger.Printf("Analyzing message %d/%d (ID: %d): %s", idx+1, len(messages), message.TelegramID, message.Text.String)
+		analysis, err := aiClient.AnalyzeMessage(context.Background(), message.Text.String, fmt.Sprintf("%d", message.ChannelID), message.TelegramID)
 		if err != nil {
-			logger.Printf("Failed to analyze message %d (ID: %d): %v", idx+1, message.ID, err)
+			logger.Printf("Failed to analyze message %d (ID: %d): %v", idx+1, message.TelegramID, err)
 			continue
 		}
 		allAnalyses = append(allAnalyses, analysis)
@@ -113,18 +114,41 @@ func main() {
 			for _, pred := range analysis.Predictions {
 				// Проверяем, что Ticker не пустой и PredictionType не 'Неопределенный' перед сохранением
 				if pred.Ticker == "" || pred.PredictionType == "Неопределенный" {
-					logger.Printf("Prediction for message %d with ticker '%s' and type '%s' ignored (empty ticker or 'Неопределенный' type). Skipping.", message.ID, pred.Ticker, pred.PredictionType)
+					logger.Printf("Prediction for message %d with ticker '%s' and type '%s' ignored (empty ticker or 'Неопределенный' type). Skipping.", message.TelegramID, pred.Ticker, pred.PredictionType)
 					continue
 				}
 
-				stock, err := dbStorage.GetOrCreateStock(context.Background(), pred.Ticker)
+				stock, err := dbStorage.GetStock(context.Background(), pred.Ticker)
 				if err != nil {
-					logger.Printf("Failed to get or create stock for ticker %s: %v", pred.Ticker, err)
+					if errors.Is(err, sql.ErrNoRows) {
+						logger.Printf("Stock with ticker '%s' not found. Saving as raw prediction.", pred.Ticker)
+						rawPrediction := storage.RawPrediction{
+							MessageID:           message.TelegramID,
+							RawTicker:           sql.NullString{String: pred.Ticker, Valid: true},
+							PredictionType:      sql.NullString{String: pred.PredictionType, Valid: pred.PredictionType != ""},
+							TargetPrice:         sql.NullFloat64{Float64: pred.TargetPrice.FloatValue, Valid: !pred.TargetPrice.IsNull && !pred.TargetPrice.IsString},
+							TargetChangePercent: sql.NullFloat64{Float64: pred.TargetChangePercent.FloatValue, Valid: !pred.TargetChangePercent.IsNull && !pred.TargetChangePercent.IsString},
+							Period:              sql.NullString{String: pred.Period, Valid: pred.Period != ""},
+							Recommendation:      sql.NullString{String: pred.Recommendation, Valid: pred.Recommendation != ""},
+							Direction:           sql.NullString{String: pred.Direction, Valid: pred.Direction != ""},
+							JustificationText:   sql.NullString{String: pred.JustificationText, Valid: pred.JustificationText != ""},
+							PredictedAt:         time.Now(),
+						}
+						logger.Printf("Attempting to save raw prediction for message %d with ticker '%s'", message.TelegramID, pred.Ticker)
+						err = dbStorage.SaveRawPrediction(context.Background(), &rawPrediction)
+						if err != nil {
+							logger.Printf("Failed to save raw prediction for message %d: %v", message.TelegramID, err)
+						} else {
+							logger.Printf("Raw prediction for message %d saved to DB.", message.TelegramID)
+						}
+						continue
+					}
+					logger.Printf("Failed to get stock for ticker %s: %v", pred.Ticker, err)
 					continue
 				}
 
 				dbPrediction := storage.Prediction{
-					MessageID:           message.ID,
+					MessageID:           message.TelegramID,
 					StockID:             stock.ID,
 					PredictionType:      sql.NullString{String: pred.PredictionType, Valid: pred.PredictionType != ""},
 					TargetPrice:         sql.NullFloat64{Float64: pred.TargetPrice.FloatValue, Valid: !pred.TargetPrice.IsNull && !pred.TargetPrice.IsString},
@@ -138,9 +162,9 @@ func main() {
 
 				err = dbStorage.SavePrediction(context.Background(), &dbPrediction)
 				if err != nil {
-					logger.Printf("Failed to save prediction for message %d: %v", message.ID, err)
+					logger.Printf("Failed to save prediction for message %d: %v", message.TelegramID, err)
 				} else {
-					logger.Printf("Prediction for message %d saved to DB.", message.ID)
+					logger.Printf("Prediction for message %d saved to DB.", message.TelegramID)
 				}
 			}
 		} else {
